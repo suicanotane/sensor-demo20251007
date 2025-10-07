@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web版 予知保全MVP</title>
+    <title>Web版 予知保全MVP v4</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -13,16 +13,19 @@
             padding: 20px;
             background-color: #f0f2f5;
             color: #1c1e21;
+            transition: background-color 0.2s;
         }
         h1 {
             font-size: 1.5rem;
         }
         #controls {
+            display: flex;
+            gap: 10px;
             margin-bottom: 20px;
         }
         button {
-            font-size: 1.2rem;
-            padding: 10px 20px;
+            font-size: 1.1rem;
+            padding: 10px 15px;
             border-radius: 8px;
             border: none;
             cursor: pointer;
@@ -30,33 +33,33 @@
             color: white;
             transition: background-color 0.3s;
         }
-        button:hover {
-            background-color: #0056b3;
-        }
+        button:hover { background-color: #0056b3; }
+        button#thermalToggle { background-color: #6c757d; }
+        button#thermalToggle.active { background-color: #dc3545; }
+
         #video-container {
-            position: relative;
             width: 90%;
             max-width: 400px;
             margin-bottom: 20px;
+            background-color: #000;
+            border-radius: 12px;
+            overflow: hidden; /* フィルターが角からはみ出ないように */
         }
         video {
             width: 100%;
-            border-radius: 12px;
-            transform: scaleX(-1); /* 鏡像にする */
+            display: block; /* 下に隙間ができないように */
+            transform: scaleX(-1);
+            transition: filter 0.5s; /* フィルター変化のアニメーション */
         }
-        #volume-meter {
+        /* --- サーマルスキャン用のCSSフィルター --- */
+        video.thermal-effect {
+            filter: hue-rotate(180deg) contrast(200%) brightness(120%) saturate(250%);
+        }
+
+        #audioCanvas {
             width: 100%;
-            height: 20px;
-            background-color: #e0e0e0;
-            border-radius: 10px;
-            overflow: hidden;
-            margin-top: 5px;
-        }
-        #volume-level {
-            height: 100%;
-            width: 0%;
-            background-color: #4caf50;
-            transition: width 0.1s;
+            height: 60px;
+            background-color: black;
         }
         .sensor-data {
             background: white;
@@ -65,30 +68,46 @@
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             width: 90%;
             max-width: 400px;
+            position: relative;
+            overflow: hidden;
         }
         .sensor-data p {
             margin: 8px 0;
             font-size: 1rem;
             font-family: 'Menlo', 'Monaco', monospace;
         }
+        #status {
+            font-weight: bold;
+        }
+        #status.normal { color: green; }
+        #status.warning { color: red; }
+        #alert {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(255, 0, 0, 0.85); color: white;
+            display: flex; justify-content: center; align-items: center;
+            font-size: 1.8rem; font-weight: bold; text-align: center;
+            opacity: 0; transition: opacity 0.2s; pointer-events: none;
+        }
+        #alert.visible { opacity: 1; }
     </style>
 </head>
 <body>
 
-    <h1>Web版 予知保全MVP</h1>
+    <h1>Web版 予知保全MVP v4</h1>
 
     <div id="controls">
         <button id="startButton">監視スタート</button>
+        <button id="thermalToggle">サーマルスキャン OFF</button>
     </div>
 
     <div id="video-container">
         <video id="video" playsinline autoplay muted></video>
-        <div id="volume-meter">
-            <div id="volume-level"></div>
-        </div>
+        <canvas id="audioCanvas"></canvas>
     </div>
 
     <div class="sensor-data">
+        <div id="alert"></div>
+        <p>システム状態: <span id="status" class="normal">待機中</span></p>
         <p>加速度 X: <span id="accelX">0.00</span></p>
         <p>加速度 Y: <span id="accelY">0.00</span></p>
         <p>加速度 Z: <span id="accelZ">0.00</span></p>
@@ -96,75 +115,115 @@
 
     <script>
         const startButton = document.getElementById('startButton');
+        const thermalToggle = document.getElementById('thermalToggle');
         const video = document.getElementById('video');
-        const volumeLevel = document.getElementById('volume-level');
-        const accelX = document.getElementById('accelX');
-        const accelY = document.getElementById('accelY');
-        const accelZ = document.getElementById('accelZ');
+        const statusSpan = document.getElementById('status');
+        const alertDiv = document.getElementById('alert');
+        const audioCanvas = document.getElementById('audioCanvas');
+        const canvasCtx = audioCanvas.getContext('2d');
+        
+        let lastMagnitude = null;
+        const MOTION_ALERT_THRESHOLD = 3.0;
+        const AUDIO_ALERT_THRESHOLD = 150; // 周波数データ用に調整 (0-255)
+        let isAlerting = false;
 
-        let audioContext;
-        let analyser;
-        let microphone;
+        // --- サーマルスキャンボタンの処理 ---
+        thermalToggle.onclick = () => {
+            video.classList.toggle('thermal-effect');
+            const isActive = video.classList.contains('thermal-effect');
+            thermalToggle.textContent = `サーマルスキャン ${isActive ? 'ON' : 'OFF'}`;
+            thermalToggle.classList.toggle('active', isActive);
+        };
 
         startButton.onclick = async () => {
-            // --- 1. カメラとマイクの権限を取得 ---
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'user' }, // 'environment'で背面カメラ
-                    audio: true
-                });
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
                 video.srcObject = stream;
                 
-                // --- 音声処理のセットアップ ---
-                audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                analyser = audioContext.createAnalyser();
-                microphone = audioContext.createMediaStreamSource(stream);
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const analyser = audioContext.createAnalyser();
+                const microphone = audioContext.createMediaStreamSource(stream);
                 microphone.connect(analyser);
                 analyser.fftSize = 256;
                 const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-                function updateVolume() {
+                function draw() {
+                    requestAnimationFrame(draw);
+                    
+                    // --- 周波数データを取得 ---
                     analyser.getByteFrequencyData(dataArray);
-                    let sum = 0;
-                    dataArray.forEach(value => sum += value);
-                    let average = sum / dataArray.length;
-                    volumeLevel.style.width = `${average}%`;
-                    requestAnimationFrame(updateVolume);
+
+                    // --- 音量アラート (最大周波数で判断) ---
+                    let maxFreq = 0;
+                    for (let i = 0; i < dataArray.length; i++) {
+                        if (dataArray[i] > maxFreq) { maxFreq = dataArray[i]; }
+                    }
+                    if (maxFreq > AUDIO_ALERT_THRESHOLD) {
+                        showAlert('🔊 高周波音を検知');
+                    }
+
+                    // --- 周波数スペクトラムの描画 ---
+                    canvasCtx.fillStyle = 'rgb(0, 0, 0)';
+                    canvasCtx.fillRect(0, 0, audioCanvas.width, audioCanvas.height);
+                    const barWidth = (audioCanvas.width / dataArray.length) * 2.5;
+                    let x = 0;
+                    for (let i = 0; i < dataArray.length; i++) {
+                        const barHeight = dataArray[i];
+                        const g = barHeight + 100; // 緑成分
+                        const r = 250 - barHeight; // 赤成分
+                        canvasCtx.fillStyle = `rgb(${r}, ${g}, 50)`;
+                        canvasCtx.fillRect(x, audioCanvas.height - barHeight / 2, barWidth, barHeight / 2);
+                        x += barWidth + 1;
+                    }
                 }
-                updateVolume();
+                draw();
 
-            } catch (err) {
-                console.error("カメラ/マイクへのアクセスエラー:", err);
-                alert("カメラとマイクへのアクセスを許可してください。");
-                return;
-            }
+            } catch (err) { alert("カメラとマイクへのアクセスを許可してください。"); return; }
 
-            // --- 2. 加速度センサーの権限を取得 (iOS 13以降で必須) ---
             if (typeof DeviceMotionEvent.requestPermission === 'function') {
                 try {
                     const permissionState = await DeviceMotionEvent.requestPermission();
-                    if (permissionState === 'granted') {
-                        window.addEventListener('devicemotion', handleMotionEvent);
-                    }
-                } catch (err) {
-                    console.error("モーションセンサーへのアクセスエラー:", err);
-                    alert("モーションセンサーへのアクセスを許可してください。");
-                }
-            } else {
-                // iOS 13より前、またはAndroidの場合
-                window.addEventListener('devicemotion', handleMotionEvent);
-            }
+                    if (permissionState === 'granted') window.addEventListener('devicemotion', handleMotionEvent);
+                } catch (err) { alert("モーションセンサーへのアクセスを許可してください。"); }
+            } else { window.addEventListener('devicemotion', handleMotionEvent); }
             
             startButton.textContent = "監視中...";
             startButton.disabled = true;
+            statusSpan.textContent = '正常';
+            statusSpan.className = 'normal';
         };
 
         function handleMotionEvent(event) {
-            const acc = event.accelerationIncludingGravity;
-            accelX.textContent = acc.x.toFixed(2);
-            accelY.textContent = acc.y.toFixed(2);
-            accelZ.textContent = acc.z.toFixed(2);
+            const acc = event.acceleration;
+            if (!acc.x) return;
+            document.getElementById('accelX').textContent = acc.x.toFixed(2);
+            document.getElementById('accelY').textContent = acc.y.toFixed(2);
+            document.getElementById('accelZ').textContent = acc.z.toFixed(2);
+
+            const magnitude = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+            if (lastMagnitude !== null) {
+                const delta = Math.abs(magnitude - lastMagnitude);
+                if (delta > MOTION_ALERT_THRESHOLD) showAlert('⚠️ 衝撃検知');
+            }
+            lastMagnitude = magnitude;
+        }
+
+        function showAlert(message) {
+            if (isAlerting) return;
+            isAlerting = true;
+            alertDiv.textContent = message;
+            alertDiv.classList.add('visible');
+            statusSpan.textContent = '警告';
+            statusSpan.className = 'warning';
+            
+            setTimeout(() => {
+                alertDiv.classList.remove('visible');
+                statusSpan.textContent = '正常';
+                statusSpan.className = 'normal';
+                isAlerting = false;
+            }, 1000); // アラート表示を少し長く
         }
     </script>
 </body>
 </html>
+
