@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web版 予知保全MVP v4.1</title>
+    <title>Web版 予知保全MVP v4.2</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -34,6 +34,7 @@
             transition: background-color 0.3s;
         }
         button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #6c757d; }
         button#thermalToggle { background-color: #6c757d; }
         button#thermalToggle.active { background-color: #dc3545; }
 
@@ -51,7 +52,6 @@
             transform: scaleX(-1);
             transition: filter 0.5s; /* フィルター変化のアニメーション */
         }
-        /* --- サーマルスキャン用のCSSフィルター --- */
         video.thermal-effect {
             filter: hue-rotate(180deg) contrast(200%) brightness(120%) saturate(250%);
         }
@@ -93,7 +93,7 @@
 </head>
 <body>
 
-    <h1>Web版 予知保全MVP v4.1</h1>
+    <h1>Web版 予知保全MVP v4.2</h1>
 
     <div id="controls">
         <button id="startButton">監視スタート</button>
@@ -124,10 +124,9 @@
         
         let lastMagnitude = null;
         const MOTION_ALERT_THRESHOLD = 3.0;
-        const AUDIO_ALERT_THRESHOLD = 150; // 周波数データ用に調整 (0-255)
+        const AUDIO_ALERT_THRESHOLD = 150;
         let isAlerting = false;
 
-        // --- サーマルスキャンボタンの処理 ---
         thermalToggle.onclick = () => {
             video.classList.toggle('thermal-effect');
             const isActive = video.classList.contains('thermal-effect');
@@ -135,68 +134,86 @@
             thermalToggle.classList.toggle('active', isActive);
         };
 
+        // --- 「監視スタート」ボタンを押したときの処理を改善 ---
         startButton.onclick = async () => {
+            startButton.textContent = "権限を許可中...";
+            startButton.disabled = true;
+
+            // --- ステップ1: カメラとマイクの権限を要求 ---
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
                 video.srcObject = stream;
-                
-                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                const analyser = audioContext.createAnalyser();
-                const microphone = audioContext.createMediaStreamSource(stream);
-                microphone.connect(analyser);
-                analyser.fftSize = 256;
-                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                setupAudioProcessing(stream); // 成功したら音声処理を開始
+            } catch (err) {
+                alert("カメラとマイクへのアクセスが拒否されました。");
+                startButton.textContent = "監視スタート";
+                startButton.disabled = false;
+                return; // 処理を中断
+            }
 
-                function draw() {
-                    requestAnimationFrame(draw);
-                    
-                    // --- 周波数データを取得 ---
-                    analyser.getByteFrequencyData(dataArray);
-
-                    // --- 音量アラート (最大周波数で判断) ---
-                    let maxFreq = 0;
-                    for (let i = 0; i < dataArray.length; i++) {
-                        if (dataArray[i] > maxFreq) { maxFreq = dataArray[i]; }
-                    }
-                    if (maxFreq > AUDIO_ALERT_THRESHOLD) {
-                        showAlert('🔊 高周波音を検知');
-                    }
-
-                    // --- 周波数スペクトラムの描画 ---
-                    canvasCtx.fillStyle = 'rgb(0, 0, 0)';
-                    canvasCtx.fillRect(0, 0, audioCanvas.width, audioCanvas.height);
-                    const barWidth = (audioCanvas.width / dataArray.length) * 2.5;
-                    let x = 0;
-                    for (let i = 0; i < dataArray.length; i++) {
-                        const barHeight = dataArray[i];
-                        const g = barHeight + 100; // 緑成分
-                        const r = 250 - barHeight; // 赤成分
-                        canvasCtx.fillStyle = `rgb(${r}, ${g}, 50)`;
-                        canvasCtx.fillRect(x, audioCanvas.height - barHeight / 2, barWidth, barHeight / 2);
-                        x += barWidth + 1;
-                    }
-                }
-                draw();
-
-            } catch (err) { alert("カメラとマイクへのアクセスを許可してください。"); return; }
-
-            if (typeof DeviceMotionEvent.requestPermission === 'function') {
-                try {
+            // --- ステップ2: 加速度センサーの権限を要求 ---
+            try {
+                // DeviceMotionEvent.requestPermission が存在するかチェック (iOS 13+ 専用)
+                if (typeof DeviceMotionEvent.requestPermission === 'function') {
                     const permissionState = await DeviceMotionEvent.requestPermission();
-                    if (permissionState === 'granted') window.addEventListener('devicemotion', handleMotionEvent);
-                } catch (err) { alert("モーションセンサーへのアクセスを許可してください。"); }
-            } else { window.addEventListener('devicemotion', handleMotionEvent); }
-            
-            startButton.textContent = "監視中...";
-            startButton.disabled = true;
+                    if (permissionState === 'granted') {
+                        window.addEventListener('devicemotion', handleMotionEvent);
+                    } else {
+                        alert("モーションセンサーへのアクセスが拒否されました。");
+                    }
+                } else {
+                    // iOS 13より前、またはAndroidの場合
+                    window.addEventListener('devicemotion', handleMotionEvent);
+                }
+            } catch (err) {
+                console.error("モーションセンサーの権限リクエストでエラー:", err);
+            }
+
+            // --- 全ての権限が許可されたら、監視モードに移行 ---
+            startButton.textContent = "監視中";
             statusSpan.textContent = '正常';
             statusSpan.className = 'normal';
         };
 
+        function setupAudioProcessing(stream) {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const analyser = audioContext.createAnalyser();
+            const microphone = audioContext.createMediaStreamSource(stream);
+            microphone.connect(analyser);
+            analyser.fftSize = 256;
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+            function draw() {
+                requestAnimationFrame(draw);
+                analyser.getByteFrequencyData(dataArray);
+
+                let maxFreq = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                    if (dataArray[i] > maxFreq) { maxFreq = dataArray[i]; }
+                }
+                if (maxFreq > AUDIO_ALERT_THRESHOLD) {
+                    showAlert('🔊 高周波音を検知');
+                }
+
+                canvasCtx.fillStyle = 'rgb(0, 0, 0)';
+                canvasCtx.fillRect(0, 0, audioCanvas.width, audioCanvas.height);
+                const barWidth = (audioCanvas.width / dataArray.length) * 2.5;
+                let x = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                    const barHeight = dataArray[i];
+                    const g = barHeight + 100;
+                    const r = 250 - barHeight;
+                    canvasCtx.fillStyle = `rgb(${r}, ${g}, 50)`;
+                    canvasCtx.fillRect(x, audioCanvas.height - barHeight / 2, barWidth, barHeight / 2);
+                    x += barWidth + 1;
+                }
+            }
+            draw();
+        }
+
         function handleMotionEvent(event) {
-            // 【修正点】より安定して値を取得できる `accelerationIncludingGravity` を使用します
             const acc = event.accelerationIncludingGravity;
-            if (!acc.x) return;
+            if (!acc || acc.x === null) return; // 値がnullの場合を除外
             document.getElementById('accelX').textContent = acc.x.toFixed(2);
             document.getElementById('accelY').textContent = acc.y.toFixed(2);
             document.getElementById('accelZ').textContent = acc.z.toFixed(2);
@@ -222,7 +239,7 @@
                 statusSpan.textContent = '正常';
                 statusSpan.className = 'normal';
                 isAlerting = false;
-            }, 1000); // アラート表示を少し長く
+            }, 1000);
         }
     </script>
 </body>
