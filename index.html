@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web版 予知保全MVP v4</title>
+    <title>Web版 予知保全MVP v4.1</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -93,7 +93,7 @@
 </head>
 <body>
 
-    <h1>Web版 予知保全MVP v4</h1>
+    <h1>Web版 予知保全MVP v4.1</h1>
 
     <div id="controls">
         <button id="startButton">監視スタート</button>
@@ -194,7 +194,8 @@
         };
 
         function handleMotionEvent(event) {
-            const acc = event.acceleration;
+            // 【修正点】より安定して値を取得できる `accelerationIncludingGravity` を使用します
+            const acc = event.accelerationIncludingGravity;
             if (!acc.x) return;
             document.getElementById('accelX').textContent = acc.x.toFixed(2);
             document.getElementById('accelY').textContent = acc.y.toFixed(2);
